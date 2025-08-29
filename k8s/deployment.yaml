@@ -1,0 +1,954 @@
+# Kubernetes deployment configuration for ASL Translation System
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: asl-translator
+  labels:
+    name: asl-translator
+
+---
+# ConfigMap for application configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: asl-translator
+data:
+  NODE_ENV: "production"
+  NATS_URL: "nats://nats-service:4222"
+  REDIS_URL: "redis://redis-service:6379"
+  DATABASE_URL: "postgresql://postgres:password@postgres-service:5432/asl_translator"
+  VECTOR_DB_URL: "http://qdrant-service:6333"
+  OTEL_ENDPOINT: "http://jaeger-service:4318"
+
+---
+# Secret for sensitive data
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secrets
+  namespace: asl-translator
+type: Opaque
+data:
+  JWT_SECRET: <base64-encoded-jwt-secret>
+  POSTGRES_PASSWORD: <base64-encoded-password>
+  REDIS_PASSWORD: <base64-encoded-password>
+  OPENAI_API_KEY: <base64-encoded-api-key>
+  AWS_ACCESS_KEY_ID: <base64-encoded-access-key>
+  AWS_SECRET_ACCESS_KEY: <base64-encoded-secret-key>
+
+---
+# Frontend Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: asl-translator
+  labels:
+    app: frontend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+      - name: frontend
+        image: asl-translator/frontend:latest
+        ports:
+        - containerPort: 3000
+        env:
+        - name: NODE_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: app-config
+              key: NODE_ENV
+        - name: NEXT_PUBLIC_API_URL
+          value: "https://api.asl-translator.com"
+        - name: NEXT_PUBLIC_WS_URL
+          value: "wss://api.asl-translator.com/ws"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+---
+# Frontend Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: asl-translator
+spec:
+  selector:
+    app: frontend
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 3000
+  type: ClusterIP
+
+---
+# Backend API Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: asl-translator
+  labels:
+    app: backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+      - name: backend
+        image: asl-translator/backend:latest
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - configMapRef:
+            name: app-config
+        env:
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: JWT_SECRET
+        - name: DATABASE_URL
+          value: "postgresql://postgres:$(POSTGRES_PASSWORD)@postgres-service:5432/asl_translator"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+
+---
+# Backend Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: asl-translator
+spec:
+  selector:
+    app: backend
+  ports:
+  - protocol: TCP
+    port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+# Pose Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pose-worker
+  namespace: asl-translator
+  labels:
+    app: pose-worker
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: pose-worker
+  template:
+    metadata:
+      labels:
+        app: pose-worker
+    spec:
+      containers:
+      - name: pose-worker
+        image: asl-translator/pose-worker:latest
+        ports:
+        - containerPort: 8001
+        envFrom:
+        - configMapRef:
+            name: app-config
+        env:
+        - name: MODEL_PATH
+          value: "/models/pose_detection"
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0"
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+          readOnly: true
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+            nvidia.com/gpu: 1
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+            nvidia.com/gpu: 1
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: model-storage-pvc
+      nodeSelector:
+        accelerator: nvidia-tesla-v100
+
+---
+# Gloss Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gloss-worker
+  namespace: asl-translator
+  labels:
+    app: gloss-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: gloss-worker
+  template:
+    metadata:
+      labels:
+        app: gloss-worker
+    spec:
+      containers:
+      - name: gloss-worker
+        image: asl-translator/gloss-worker:latest
+        ports:
+        - containerPort: 8002
+        envFrom:
+        - configMapRef:
+            name: app-config
+        env:
+        - name: MODEL_PATH
+          value: "/models/gloss_decoder"
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+          readOnly: true
+        resources:
+          requests:
+            memory: "3Gi"
+            cpu: "1500m"
+            nvidia.com/gpu: 1
+          limits:
+            memory: "6Gi"
+            cpu: "3000m"
+            nvidia.com/gpu: 1
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: model-storage-pvc
+      nodeSelector:
+        accelerator: nvidia-tesla-v100
+
+---
+# Semantic Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: semantic-worker
+  namespace: asl-translator
+  labels:
+    app: semantic-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: semantic-worker
+  template:
+    metadata:
+      labels:
+        app: semantic-worker
+    spec:
+      containers:
+      - name: semantic-worker
+        image: asl-translator/semantic-worker:latest
+        ports:
+        - containerPort: 8003
+        envFrom:
+        - configMapRef:
+            name: app-config
+        env:
+        - name: MODEL_PATH
+          value: "/models/semantic_translator"
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+          readOnly: true
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2000m"
+            nvidia.com/gpu: 1
+          limits:
+            memory: "8Gi"
+            cpu: "4000m"
+            nvidia.com/gpu: 1
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: model-storage-pvc
+      nodeSelector:
+        accelerator: nvidia-tesla-v100
+
+---
+# RAG Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag-worker
+  namespace: asl-translator
+  labels:
+    app: rag-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rag-worker
+  template:
+    metadata:
+      labels:
+        app: rag-worker
+    spec:
+      containers:
+      - name: rag-worker
+        image: asl-translator/rag-worker:latest
+        ports:
+        - containerPort: 8004
+        envFrom:
+        - configMapRef:
+            name: app-config
+        env:
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: OPENAI_API_KEY
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+
+---
+# TTS Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tts-worker
+  namespace: asl-translator
+  labels:
+    app: tts-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: tts-worker
+  template:
+    metadata:
+      labels:
+        app: tts-worker
+    spec:
+      containers:
+      - name: tts-worker
+        image: asl-translator/tts-worker:latest
+        ports:
+        - containerPort: 8005
+        envFrom:
+        - configMapRef:
+            name: app-config
+        env:
+        - name: MODEL_PATH
+          value: "/models/tts"
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+          readOnly: true
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: model-storage-pvc
+
+---
+# ASR Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: asr-worker
+  namespace: asl-translator
+  labels:
+    app: asr-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: asr-worker
+  template:
+    metadata:
+      labels:
+        app: asr-worker
+    spec:
+      containers:
+      - name: asr-worker
+        image: asl-translator/asr-worker:latest
+        ports:
+        - containerPort: 8006
+        envFrom:
+        - configMapRef:
+            name: app-config
+        env:
+        - name: MODEL_PATH
+          value: "/models/asr"
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+          readOnly: true
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: model-storage-pvc
+
+---
+# Export Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: export-worker
+  namespace: asl-translator
+  labels:
+    app: export-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: export-worker
+  template:
+    metadata:
+      labels:
+        app: export-worker
+    spec:
+      containers:
+      - name: export-worker
+        image: asl-translator/export-worker:latest
+        ports:
+        - containerPort: 8007
+        envFrom:
+        - configMapRef:
+            name: app-config
+        env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: AWS_ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: AWS_SECRET_ACCESS_KEY
+        - name: S3_BUCKET
+          value: "asl-translator-exports"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+
+---
+# PostgreSQL Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: asl-translator
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: "asl_translator"
+        - name: POSTGRES_USER
+          value: "postgres"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: POSTGRES_PASSWORD
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: asl-translator
+spec:
+  selector:
+    app: postgres
+  ports:
+  - protocol: TCP
+    port: 5432
+    targetPort: 5432
+  type: ClusterIP
+
+---
+# Redis Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: asl-translator
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        command: ["redis-server", "--appendonly", "yes", "--requirepass", "$(REDIS_PASSWORD)"]
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: REDIS_PASSWORD
+        volumeMounts:
+        - name: redis-storage
+          mountPath: /data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+      volumes:
+      - name: redis-storage
+        persistentVolumeClaim:
+          claimName: redis-pvc
+
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: asl-translator
+spec:
+  selector:
+    app: redis
+  ports:
+  - protocol: TCP
+    port: 6379
+    targetPort: 6379
+  type: ClusterIP
+
+---
+# NATS Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nats
+  namespace: asl-translator
+  labels:
+    app: nats
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nats
+  template:
+    metadata:
+      labels:
+        app: nats
+    spec:
+      containers:
+      - name: nats
+        image: nats:2.9-alpine
+        ports:
+        - containerPort: 4222
+        - containerPort: 8222
+        command: 
+        - "nats-server"
+        - "--jetstream"
+        - "--store_dir=/data"
+        - "--max_memory_store=1GB"
+        - "--max_file_store=10GB"
+        - "--cluster_name=asl-nats"
+        - "--cluster=nats://0.0.0.0:6222"
+        - "--routes=nats://nats-service:6222"
+        volumeMounts:
+        - name: nats-storage
+          mountPath: /data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+      volumes:
+      - name: nats-storage
+        persistentVolumeClaim:
+          claimName: nats-pvc
+
+---
+# NATS Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats-service
+  namespace: asl-translator
+spec:
+  selector:
+    app: nats
+  ports:
+  - name: client
+    protocol: TCP
+    port: 4222
+    targetPort: 4222
+  - name: monitoring
+    protocol: TCP
+    port: 8222
+    targetPort: 8222
+  - name: cluster
+    protocol: TCP
+    port: 6222
+    targetPort: 6222
+  type: ClusterIP
+
+---
+# Qdrant Vector Database Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qdrant
+  namespace: asl-translator
+  labels:
+    app: qdrant
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qdrant
+  template:
+    metadata:
+      labels:
+        app: qdrant
+    spec:
+      containers:
+      - name: qdrant
+        image: qdrant/qdrant:v1.7.0
+        ports:
+        - containerPort: 6333
+        - containerPort: 6334
+        env:
+        - name: QDRANT__SERVICE__HTTP_PORT
+          value: "6333"
+        - name: QDRANT__SERVICE__GRPC_PORT
+          value: "6334"
+        volumeMounts:
+        - name: qdrant-storage
+          mountPath: /qdrant/storage
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+      volumes:
+      - name: qdrant-storage
+        persistentVolumeClaim:
+          claimName: qdrant-pvc
+
+---
+# Qdrant Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant-service
+  namespace: asl-translator
+spec:
+  selector:
+    app: qdrant
+  ports:
+  - name: http
+    protocol: TCP
+    port: 6333
+    targetPort: 6333
+  - name: grpc
+    protocol: TCP
+    port: 6334
+    targetPort: 6334
+  type: ClusterIP
+
+---
+# Ingress for external access
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: asl-translator-ingress
+  namespace: asl-translator
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+spec:
+  tls:
+  - hosts:
+    - asl-translator.com
+    - api.asl-translator.com
+    secretName: asl-translator-tls
+  rules:
+  - host: asl-translator.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-service
+            port:
+              number: 80
+  - host: api.asl-translator.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: backend-service
+            port:
+              number: 8000
+
+---
+# Horizontal Pod Autoscaler for Backend
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa
+  namespace: asl-translator
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# Horizontal Pod Autoscaler for Pose Worker
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: pose-worker-hpa
+  namespace: asl-translator
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: pose-worker
+  minReplicas: 3
+  maxReplicas: 8
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 75
+
+---
+# Persistent Volume Claims
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: asl-translator
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: fast-ssd
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+  namespace: asl-translator
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: fast-ssd
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nats-pvc
+  namespace: asl-translator
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: fast-ssd
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: qdrant-pvc
+  namespace: asl-translator
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: fast-ssd
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-storage-pvc
+  namespace: asl-translator
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 500Gi
+  storageClassName: fast-ssd

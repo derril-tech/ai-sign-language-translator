@@ -1,0 +1,371 @@
+version: '3.8'
+
+services:
+  # Frontend (Next.js)
+  frontend:
+    build:
+      context: ./apps/frontend
+      dockerfile: Dockerfile.prod
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=${API_URL}
+      - NEXT_PUBLIC_WS_URL=${WS_URL}
+    depends_on:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Backend API Gateway (NestJS)
+  backend:
+    build:
+      context: ./apps/backend
+      dockerfile: Dockerfile.prod
+    ports:
+      - "8000:8000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - NATS_URL=${NATS_URL}
+      - JWT_SECRET=${JWT_SECRET}
+      - OPENTELEMETRY_ENDPOINT=${OTEL_ENDPOINT}
+    depends_on:
+      - postgres
+      - redis
+      - nats
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Pose Detection Worker
+  pose-worker:
+    build:
+      context: ./apps/workers/pose-worker
+      dockerfile: Dockerfile.prod
+    environment:
+      - NATS_URL=${NATS_URL}
+      - REDIS_URL=${REDIS_URL}
+      - MODEL_PATH=/models/pose_detection
+      - CUDA_VISIBLE_DEVICES=${CUDA_DEVICES:-0}
+    volumes:
+      - ./models:/models:ro
+    deploy:
+      replicas: 3
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Gloss Decoder Worker
+  gloss-worker:
+    build:
+      context: ./apps/workers/gloss-worker
+      dockerfile: Dockerfile.prod
+    environment:
+      - NATS_URL=${NATS_URL}
+      - REDIS_URL=${REDIS_URL}
+      - MODEL_PATH=/models/gloss_decoder
+      - CUDA_VISIBLE_DEVICES=${CUDA_DEVICES:-0}
+    volumes:
+      - ./models:/models:ro
+    deploy:
+      replicas: 2
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8002/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Semantic Translation Worker
+  semantic-worker:
+    build:
+      context: ./apps/workers/semantic-worker
+      dockerfile: Dockerfile.prod
+    environment:
+      - NATS_URL=${NATS_URL}
+      - REDIS_URL=${REDIS_URL}
+      - MODEL_PATH=/models/semantic_translator
+      - CUDA_VISIBLE_DEVICES=${CUDA_DEVICES:-0}
+    volumes:
+      - ./models:/models:ro
+    deploy:
+      replicas: 2
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # RAG Enhancement Worker
+  rag-worker:
+    build:
+      context: ./apps/workers/rag-worker
+      dockerfile: Dockerfile.prod
+    environment:
+      - NATS_URL=${NATS_URL}
+      - REDIS_URL=${REDIS_URL}
+      - VECTOR_DB_URL=${VECTOR_DB_URL}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    deploy:
+      replicas: 2
+    restart: unless-stopped
+
+  # TTS Worker
+  tts-worker:
+    build:
+      context: ./apps/workers/tts-worker
+      dockerfile: Dockerfile.prod
+    environment:
+      - NATS_URL=${NATS_URL}
+      - REDIS_URL=${REDIS_URL}
+      - MODEL_PATH=/models/tts
+    volumes:
+      - ./models:/models:ro
+    deploy:
+      replicas: 2
+    restart: unless-stopped
+
+  # ASR Worker
+  asr-worker:
+    build:
+      context: ./apps/workers/asr-worker
+      dockerfile: Dockerfile.prod
+    environment:
+      - NATS_URL=${NATS_URL}
+      - REDIS_URL=${REDIS_URL}
+      - MODEL_PATH=/models/asr
+    volumes:
+      - ./models:/models:ro
+    deploy:
+      replicas: 2
+    restart: unless-stopped
+
+  # Export Worker
+  export-worker:
+    build:
+      context: ./apps/workers/export-worker
+      dockerfile: Dockerfile.prod
+    environment:
+      - NATS_URL=${NATS_URL}
+      - DATABASE_URL=${DATABASE_URL}
+      - S3_BUCKET=${S3_BUCKET}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+    volumes:
+      - ./exports:/app/exports
+    deploy:
+      replicas: 1
+    restart: unless-stopped
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # NATS Message Broker
+  nats:
+    image: nats:2.9-alpine
+    command: 
+      - "--jetstream"
+      - "--store_dir=/data"
+      - "--max_memory_store=1GB"
+      - "--max_file_store=10GB"
+    volumes:
+      - nats_data:/data
+    ports:
+      - "4222:4222"
+      - "8222:8222"  # HTTP monitoring
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8222/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Vector Database (Qdrant)
+  qdrant:
+    image: qdrant/qdrant:v1.7.0
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+    volumes:
+      - qdrant_data:/qdrant/storage
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # MinIO Object Storage (S3 compatible)
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:v2.40.0
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Grafana Dashboards
+  grafana:
+    image: grafana/grafana:9.3.0
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Jaeger Tracing
+  jaeger:
+    image: jaegertracing/all-in-one:1.41
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "14268:14268"  # Jaeger collector HTTP
+      - "4317:4317"    # OTLP gRPC receiver
+      - "4318:4318"    # OTLP HTTP receiver
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:16686/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nginx Load Balancer
+  nginx:
+    image: nginx:1.23-alpine
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+  redis_data:
+  nats_data:
+  qdrant_data:
+  minio_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

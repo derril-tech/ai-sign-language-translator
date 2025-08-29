@@ -1,0 +1,215 @@
+# Prometheus configuration for ASL Translation System monitoring
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'asl-translator'
+    environment: 'production'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+
+# Load rules once and periodically evaluate them
+rule_files:
+  - "alert_rules.yml"
+  - "recording_rules.yml"
+
+# Scrape configuration
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Frontend application metrics
+  - job_name: 'frontend'
+    static_configs:
+      - targets: ['frontend:3000']
+    metrics_path: '/api/metrics'
+    scrape_interval: 10s
+
+  # Backend API metrics
+  - job_name: 'backend'
+    static_configs:
+      - targets: ['backend:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # Pose Worker metrics
+  - job_name: 'pose-worker'
+    static_configs:
+      - targets: ['pose-worker:8001']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # Gloss Worker metrics
+  - job_name: 'gloss-worker'
+    static_configs:
+      - targets: ['gloss-worker:8002']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # Semantic Worker metrics
+  - job_name: 'semantic-worker'
+    static_configs:
+      - targets: ['semantic-worker:8003']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # RAG Worker metrics
+  - job_name: 'rag-worker'
+    static_configs:
+      - targets: ['rag-worker:8004']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # TTS Worker metrics
+  - job_name: 'tts-worker'
+    static_configs:
+      - targets: ['tts-worker:8005']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # ASR Worker metrics
+  - job_name: 'asr-worker'
+    static_configs:
+      - targets: ['asr-worker:8006']
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # Export Worker metrics
+  - job_name: 'export-worker'
+    static_configs:
+      - targets: ['export-worker:8007']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # PostgreSQL metrics
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+    scrape_interval: 30s
+
+  # Redis metrics
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+    scrape_interval: 30s
+
+  # NATS metrics
+  - job_name: 'nats'
+    static_configs:
+      - targets: ['nats:8222']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # Qdrant metrics
+  - job_name: 'qdrant'
+    static_configs:
+      - targets: ['qdrant:6333']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # Node Exporter for system metrics
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+    scrape_interval: 30s
+
+  # cAdvisor for container metrics
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+    scrape_interval: 30s
+
+  # Nginx metrics
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['nginx-exporter:9113']
+    scrape_interval: 30s
+
+  # Custom application metrics
+  - job_name: 'custom-metrics'
+    static_configs:
+      - targets: ['metrics-collector:8080']
+    metrics_path: '/custom-metrics'
+    scrape_interval: 60s
+
+  # Kubernetes API server metrics (if running in K8s)
+  - job_name: 'kubernetes-apiservers'
+    kubernetes_sd_configs:
+    - role: endpoints
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+    - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+      action: keep
+      regex: default;kubernetes;https
+
+  # Kubernetes nodes (if running in K8s)
+  - job_name: 'kubernetes-nodes'
+    kubernetes_sd_configs:
+    - role: node
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+    - action: labelmap
+      regex: __meta_kubernetes_node_label_(.+)
+    - target_label: __address__
+      replacement: kubernetes.default.svc:443
+    - source_labels: [__meta_kubernetes_node_name]
+      regex: (.+)
+      target_label: __metrics_path__
+      replacement: /api/v1/nodes/${1}/proxy/metrics
+
+  # Kubernetes pods (if running in K8s)
+  - job_name: 'kubernetes-pods'
+    kubernetes_sd_configs:
+    - role: pod
+    relabel_configs:
+    - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+      action: keep
+      regex: true
+    - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+      action: replace
+      target_label: __metrics_path__
+      regex: (.+)
+    - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+      action: replace
+      regex: ([^:]+)(?::\d+)?;(\d+)
+      replacement: $1:$2
+      target_label: __address__
+    - action: labelmap
+      regex: __meta_kubernetes_pod_label_(.+)
+    - source_labels: [__meta_kubernetes_namespace]
+      action: replace
+      target_label: kubernetes_namespace
+    - source_labels: [__meta_kubernetes_pod_name]
+      action: replace
+      target_label: kubernetes_pod_name
+
+# Remote write configuration for long-term storage
+remote_write:
+  - url: "https://prometheus-remote-write.example.com/api/v1/write"
+    basic_auth:
+      username: "prometheus"
+      password: "secure-password"
+    queue_config:
+      max_samples_per_send: 1000
+      max_shards: 200
+      capacity: 2500
+
+# Storage configuration
+storage:
+  tsdb:
+    retention.time: 30d
+    retention.size: 50GB
+    wal-compression: true

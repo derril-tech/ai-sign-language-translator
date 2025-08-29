@@ -1,0 +1,359 @@
+# Prometheus alerting rules for ASL Translation System
+groups:
+  # High-level system alerts
+  - name: system.rules
+    rules:
+    - alert: HighErrorRate
+      expr: |
+        (
+          sum(rate(http_requests_total{status=~"5.."}[5m])) by (service)
+          /
+          sum(rate(http_requests_total[5m])) by (service)
+        ) > 0.05
+      for: 2m
+      labels:
+        severity: critical
+        component: "{{ $labels.service }}"
+      annotations:
+        summary: "High error rate detected"
+        description: "Service {{ $labels.service }} has error rate above 5% for more than 2 minutes"
+
+    - alert: HighLatency
+      expr: |
+        histogram_quantile(0.95, 
+          sum(rate(http_request_duration_seconds_bucket[5m])) by (le, service)
+        ) > 2.0
+      for: 5m
+      labels:
+        severity: warning
+        component: "{{ $labels.service }}"
+      annotations:
+        summary: "High latency detected"
+        description: "Service {{ $labels.service }} has 95th percentile latency above 2s"
+
+    - alert: ServiceDown
+      expr: up == 0
+      for: 1m
+      labels:
+        severity: critical
+        component: "{{ $labels.job }}"
+      annotations:
+        summary: "Service is down"
+        description: "Service {{ $labels.job }} has been down for more than 1 minute"
+
+  # Translation pipeline specific alerts
+  - name: translation.rules
+    rules:
+    - alert: LowTranslationConfidence
+      expr: |
+        avg_over_time(translation_confidence[10m]) < 0.7
+      for: 5m
+      labels:
+        severity: warning
+        component: translation
+      annotations:
+        summary: "Translation confidence is low"
+        description: "Average translation confidence has been below 70% for 5 minutes"
+
+    - alert: PoseDetectionFailure
+      expr: |
+        rate(pose_detection_failures_total[5m]) > 0.1
+      for: 2m
+      labels:
+        severity: critical
+        component: pose-worker
+      annotations:
+        summary: "High pose detection failure rate"
+        description: "Pose detection failure rate is above 10% for 2 minutes"
+
+    - alert: GlossDecodingLatency
+      expr: |
+        histogram_quantile(0.95, 
+          sum(rate(gloss_decoding_duration_seconds_bucket[5m])) by (le)
+        ) > 1.0
+      for: 3m
+      labels:
+        severity: warning
+        component: gloss-worker
+      annotations:
+        summary: "Gloss decoding latency is high"
+        description: "95th percentile gloss decoding latency is above 1 second"
+
+    - alert: SemanticTranslationBacklog
+      expr: |
+        semantic_translation_queue_size > 100
+      for: 2m
+      labels:
+        severity: warning
+        component: semantic-worker
+      annotations:
+        summary: "Semantic translation queue is backing up"
+        description: "Semantic translation queue has more than 100 items for 2 minutes"
+
+  # Resource utilization alerts
+  - name: resources.rules
+    rules:
+    - alert: HighCPUUsage
+      expr: |
+        (
+          100 - (avg by (instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+        ) > 85
+      for: 5m
+      labels:
+        severity: warning
+        component: infrastructure
+      annotations:
+        summary: "High CPU usage"
+        description: "CPU usage on {{ $labels.instance }} is above 85% for 5 minutes"
+
+    - alert: HighMemoryUsage
+      expr: |
+        (
+          (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) 
+          / node_memory_MemTotal_bytes
+        ) > 0.9
+      for: 3m
+      labels:
+        severity: critical
+        component: infrastructure
+      annotations:
+        summary: "High memory usage"
+        description: "Memory usage on {{ $labels.instance }} is above 90% for 3 minutes"
+
+    - alert: DiskSpaceLow
+      expr: |
+        (
+          node_filesystem_avail_bytes{mountpoint="/"} 
+          / node_filesystem_size_bytes{mountpoint="/"}
+        ) < 0.1
+      for: 1m
+      labels:
+        severity: critical
+        component: infrastructure
+      annotations:
+        summary: "Low disk space"
+        description: "Disk space on {{ $labels.instance }} is below 10%"
+
+    - alert: GPUUtilizationHigh
+      expr: |
+        nvidia_gpu_utilization > 95
+      for: 10m
+      labels:
+        severity: warning
+        component: gpu
+      annotations:
+        summary: "GPU utilization is very high"
+        description: "GPU {{ $labels.gpu }} utilization is above 95% for 10 minutes"
+
+    - alert: GPUMemoryHigh
+      expr: |
+        (nvidia_gpu_memory_used_bytes / nvidia_gpu_memory_total_bytes) > 0.9
+      for: 5m
+      labels:
+        severity: warning
+        component: gpu
+      annotations:
+        summary: "GPU memory usage is high"
+        description: "GPU {{ $labels.gpu }} memory usage is above 90% for 5 minutes"
+
+  # Database and storage alerts
+  - name: database.rules
+    rules:
+    - alert: PostgreSQLDown
+      expr: |
+        pg_up == 0
+      for: 1m
+      labels:
+        severity: critical
+        component: database
+      annotations:
+        summary: "PostgreSQL is down"
+        description: "PostgreSQL database is not responding"
+
+    - alert: PostgreSQLHighConnections
+      expr: |
+        (pg_stat_database_numbackends / pg_settings_max_connections) > 0.8
+      for: 2m
+      labels:
+        severity: warning
+        component: database
+      annotations:
+        summary: "PostgreSQL connection usage is high"
+        description: "PostgreSQL is using more than 80% of available connections"
+
+    - alert: RedisDown
+      expr: |
+        redis_up == 0
+      for: 1m
+      labels:
+        severity: critical
+        component: cache
+      annotations:
+        summary: "Redis is down"
+        description: "Redis cache is not responding"
+
+    - alert: RedisHighMemoryUsage
+      expr: |
+        (redis_memory_used_bytes / redis_memory_max_bytes) > 0.9
+      for: 3m
+      labels:
+        severity: warning
+        component: cache
+      annotations:
+        summary: "Redis memory usage is high"
+        description: "Redis memory usage is above 90% for 3 minutes"
+
+  # Message queue alerts
+  - name: messaging.rules
+    rules:
+    - alert: NATSDown
+      expr: |
+        nats_server_info == 0
+      for: 1m
+      labels:
+        severity: critical
+        component: messaging
+      annotations:
+        summary: "NATS server is down"
+        description: "NATS message broker is not responding"
+
+    - alert: NATSHighMessageBacklog
+      expr: |
+        nats_jetstream_stream_messages > 10000
+      for: 5m
+      labels:
+        severity: warning
+        component: messaging
+      annotations:
+        summary: "NATS message backlog is high"
+        description: "NATS stream {{ $labels.stream_name }} has more than 10k messages"
+
+    - alert: NATSConsumerLag
+      expr: |
+        nats_jetstream_consumer_num_pending > 1000
+      for: 3m
+      labels:
+        severity: warning
+        component: messaging
+      annotations:
+        summary: "NATS consumer lag is high"
+        description: "NATS consumer {{ $labels.consumer_name }} has more than 1k pending messages"
+
+  # Application-specific alerts
+  - name: application.rules
+    rules:
+    - alert: SessionCreationFailure
+      expr: |
+        rate(session_creation_failures_total[5m]) > 0.05
+      for: 2m
+      labels:
+        severity: warning
+        component: application
+      annotations:
+        summary: "High session creation failure rate"
+        description: "Session creation failure rate is above 5% for 2 minutes"
+
+    - alert: WebSocketConnectionDrop
+      expr: |
+        rate(websocket_disconnections_total[5m]) > 0.1
+      for: 3m
+      labels:
+        severity: warning
+        component: websocket
+      annotations:
+        summary: "High WebSocket disconnection rate"
+        description: "WebSocket disconnection rate is above 10% for 3 minutes"
+
+    - alert: ModelLoadingFailure
+      expr: |
+        model_loading_failures_total > 0
+      for: 0m
+      labels:
+        severity: critical
+        component: "{{ $labels.worker }}"
+      annotations:
+        summary: "Model loading failed"
+        description: "Worker {{ $labels.worker }} failed to load ML model"
+
+    - alert: ExportJobFailure
+      expr: |
+        rate(export_job_failures_total[10m]) > 0.02
+      for: 5m
+      labels:
+        severity: warning
+        component: export-worker
+      annotations:
+        summary: "Export job failure rate is high"
+        description: "Export job failure rate is above 2% for 5 minutes"
+
+  # Security alerts
+  - name: security.rules
+    rules:
+    - alert: UnauthorizedAccess
+      expr: |
+        rate(http_requests_total{status="401"}[5m]) > 0.1
+      for: 2m
+      labels:
+        severity: warning
+        component: security
+      annotations:
+        summary: "High rate of unauthorized access attempts"
+        description: "Unauthorized access rate is above 10% for 2 minutes"
+
+    - alert: SuspiciousActivity
+      expr: |
+        rate(http_requests_total{status="403"}[5m]) > 0.05
+      for: 3m
+      labels:
+        severity: warning
+        component: security
+      annotations:
+        summary: "Suspicious activity detected"
+        description: "Forbidden request rate is above 5% for 3 minutes"
+
+    - alert: RateLimitExceeded
+      expr: |
+        rate(http_requests_total{status="429"}[5m]) > 0.02
+      for: 1m
+      labels:
+        severity: info
+        component: security
+      annotations:
+        summary: "Rate limit frequently exceeded"
+        description: "Rate limit exceeded rate is above 2% for 1 minute"
+
+  # Business logic alerts
+  - name: business.rules
+    rules:
+    - alert: LowUserSatisfaction
+      expr: |
+        avg_over_time(user_satisfaction_score[1h]) < 3.5
+      for: 10m
+      labels:
+        severity: warning
+        component: business
+      annotations:
+        summary: "User satisfaction is low"
+        description: "Average user satisfaction score is below 3.5 for 10 minutes"
+
+    - alert: TranslationAccuracyDrop
+      expr: |
+        avg_over_time(translation_accuracy[30m]) < 0.8
+      for: 15m
+      labels:
+        severity: critical
+        component: business
+      annotations:
+        summary: "Translation accuracy has dropped"
+        description: "Translation accuracy is below 80% for 15 minutes"
+
+    - alert: HighUserChurn
+      expr: |
+        rate(user_session_ends_total[1h]) / rate(user_session_starts_total[1h]) > 0.5
+      for: 30m
+      labels:
+        severity: warning
+        component: business
+      annotations:
+        summary: "High user churn rate detected"
+        description: "User churn rate is above 50% for 30 minutes"
